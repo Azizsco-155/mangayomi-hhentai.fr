@@ -1,0 +1,281 @@
+const mangayomiSources = [
+  {
+    "id": 1629301945,
+    "name": "HHentai",
+    "lang": "fr",
+    "baseUrl": "https://hhentai.fr",
+    "iconUrl": "https://ih1.redbubble.net/image.1118561509.1643/raf,360x360,075,t,fafafa:ca443f4786.jpg",
+    "typeSource": "single",
+    "isManga": true,
+    "itemType": 0,
+    "hasCloudflare": false,
+    "version": "0.1.3",
+    "pkgPath": "manga/src/fr/hhentai.js"
+  }
+];
+
+class DefaultExtension extends MProvider {
+  constructor() {
+    super();
+    this.baseUrl = "https://hhentai.fr";
+    this.client = new Client();
+  }
+
+  getBaseUrl() { return this.baseUrl; }
+  getName() { return "HHentai"; }
+  getLanguage() { return "fr"; }
+
+  // Le site utilise plusieurs attributs selon le type de page.
+  // Sur les pages de lecture, le src contient parfois un espace au début.
+  getImageUrl(img) {
+    if (!img) return "";
+
+    const attributes = [
+      "data-src",
+      "data-lazy-src",
+      "data-original",
+      "data-original-src",
+      "data-url",
+      "src",
+      "data-srcset",
+      "srcset",
+    ];
+
+    for (let i = 0; i < attributes.length; i++) {
+      const value = img.attr(attributes[i]);
+      const imageUrl = this.cleanImageUrl(value);
+      if (imageUrl) return imageUrl;
+    }
+
+    return "";
+  }
+
+  hasNextPage(doc, currentPage) {
+    const options = doc.select("div.wp-pagenavi option");
+
+    for (let i = 0; i < options.length; i++) {
+      const pageNumber = parseInt(options[i].text.trim(), 10);
+      if (!isNaN(pageNumber) && pageNumber > currentPage) return true;
+    }
+
+    return doc.selectFirst("a.next, .next-page, .pagination a.active + a") != null;
+  }
+
+  async getPopular(page) {
+    const url = page == 1 
+      ? this.baseUrl + "/manga/" 
+      : this.baseUrl + "/manga/page/" + page + "/";
+    
+    const res = await this.client.get(url);
+    const doc = new Document(res.body);
+    
+    // Les vrais résultats de l'archive sont des cartes page-item-detail.manga.
+    // Le fallback aide si le thème du site change légèrement.
+    let items = doc.select("div.page-item-detail.manga");
+    if (items.length == 0) items = doc.select("div.page-item-detail");
+
+    const list = [];
+    const seen = {};
+    
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      
+      // Chercher le lien du manga
+      const a = item.selectFirst("h3 a, h4 a, .manga-title a, a[href*='/manga/']");
+      if (!a || !a.attr("href")) continue;
+
+      const link = this.cleanImageUrl(a.attr("href"));
+      if (!link || seen[link]) continue;
+      seen[link] = true;
+      
+      // Chercher l'image dans les attributs utilisés par le lazy-loading.
+      const img = item.selectFirst("img");
+      const image = this.getImageUrl(img);
+      
+      list.push({ 
+        name: a.text.trim(), 
+        link: link, 
+        imageUrl: image 
+      });
+    }
+    
+    return { 
+      list: list, 
+      hasNextPage: this.hasNextPage(doc, page)
+    };
+  }
+
+  async getLatestUpdates(page) { 
+    return await this.getPopular(page); 
+  }
+
+  async search(query, page, filters) {
+    const encodedQuery = encodeURIComponent(query);
+    const url = page == 1
+      ? this.baseUrl + "/?s=" + encodedQuery + "&post_type=wp-manga"
+      : this.baseUrl + "/page/" + page + "/?s=" + encodedQuery + "&post_type=wp-manga";
+
+    const res = await this.client.get(url);
+    const doc = new Document(res.body);
+    
+    let items = doc.select("div.c-tabs-item__content");
+    if (items.length == 0) items = doc.select("div.page-item-detail.manga");
+
+    const list = [];
+    const seen = {};
+    
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const a = item.selectFirst("a[href*='/manga/'], h3 a, h4 a");
+      
+      if (!a || !a.attr("href")) continue;
+      
+      const href = a.attr("href");
+      if (!href.includes("/manga/")) continue;
+
+      const link = this.cleanImageUrl(href);
+      if (!link || seen[link]) continue;
+      seen[link] = true;
+      
+      const img = item.selectFirst("img");
+      const image = this.getImageUrl(img);
+      
+      list.push({ 
+        name: (a.attr("title") || a.text).trim(), 
+        link: link, 
+        imageUrl: image 
+      });
+    }
+    
+    return { list: list, hasNextPage: this.hasNextPage(doc, page) };
+  }
+
+  async getDetail(url) {
+    url = this.cleanImageUrl(url);
+    const res = await this.client.get(url);
+    const doc = new Document(res.body);
+
+    // ✅ Titre
+    let titleEl = doc.selectFirst("div.post-title h1, h1.entry-title, .manga-title");
+    const title = titleEl ? titleEl.text.trim() : "";
+
+    // IMAGE : la couverture actuelle est dans summary_image.
+    const imgEl = doc.selectFirst("div.summary_image img, .manga-poster img, .post-img img");
+    const imageUrl = this.getImageUrl(imgEl);
+
+    // ✅ Description
+    let descEl = doc.selectFirst(
+      "div.description-summary div.summary__content, " +
+      "div.summary_content, .manga-excerpt.summary__content, .post-content_item p"
+    );
+    const description = descEl ? descEl.text.trim() : "";
+
+    // ✅ Auteur
+    let authorEl = doc.selectFirst("div.author-content a, .author a, .manga-author a");
+    const author = authorEl ? authorEl.text.trim() : "";
+
+    // ✅ Genres
+    const genreEls = doc.select("div.genres-content a, .manga-genre a, .tag a");
+    const genre = [];
+    for (let i = 0; i < genreEls.length; i++) {
+      genre.push(genreEls[i].text.trim());
+    }
+
+    // Sur HHentai, les épisodes sont les li.wp-manga-chapter de cette liste.
+    const chapterLis = doc.select("div.listing-chapters_wrap li.wp-manga-chapter");
+    const chapters = [];
+
+    for (let i = 0; i < chapterLis.length; i++) {
+      const li = chapterLis[i];
+      const a = li.selectFirst("a");
+      if (!a || !a.attr("href")) continue;
+
+      let rawName = a.text.trim();
+      
+      // Extraire le numéro du chapitre
+      let match = rawName.match(/(\d+(\.\d+)?)/);
+      let num = match ? parseFloat(match[1]) : (chapterLis.length - i);
+
+      // Nettoyer le nom
+      let cleanName = rawName;
+      if (!cleanName.toLowerCase().includes("chapitre")) {
+        cleanName = "Chapitre " + num;
+        if (rawName.length > 15) {
+          cleanName += " - " + rawName;
+        }
+      }
+
+      chapters.push({
+        name: cleanName,
+        url: a.attr("href"),
+        dateUpload: String(Date.now() - i * 86400000),
+      });
+    }
+
+    return {
+      name: title,
+      link: url,
+      imageUrl: imageUrl, // ✅ C'EST ICI QUE TU AVAIS LE PROBLÈME
+      description: description,
+      author: author,
+      genre: genre,
+      status: 0,
+      chapters: chapters,
+    };
+  }
+
+  async getPageList(url) {
+    const res = await this.client.get(url);
+    const doc = new Document(res.body);
+    
+    // Le sélecteur dédié évite d'ajouter les couvertures des recommandations.
+    let imgs = doc.select("div.reading-content img.wp-manga-chapter-img");
+    if (imgs.length == 0) imgs = doc.select("img.wp-manga-chapter-img");
+    if (imgs.length == 0) imgs = doc.select("div.reading-content img");
+
+    const pages = [];
+    for (let i = 0; i < imgs.length; i++) {
+      let src = this.getImageUrl(imgs[i]);
+      if (!src) continue;
+      
+      // Ignorer les images de placeholder
+      if (src.startsWith("data:")) continue;
+      if (src.includes("placeholder")) continue;
+      if (src.length < 10) continue;
+      
+      // Éviter les doublons
+      if (pages.indexOf(src) == -1) pages.push(src);
+    }
+    
+    console.log("Pages trouvées:", pages.length);
+    return pages;
+  }
+
+  // ✅ HELPER: Nettoyer et valider les URLs d'images
+  cleanImageUrl(url) {
+    if (!url || url.length < 5) return "";
+    
+    // trim doit être fait avant split : les pages de lecture commencent
+    // parfois par `src=" https://cdn.hhentai.fr//..."`.
+    url = url.trim().split(/\s+/)[0];
+    
+    // Ignorer les images invalides
+    if (url.startsWith("data:")) return "";
+    if (url.includes("placeholder")) return "";
+    
+    // Fixer les URLs relatives
+    if (url.startsWith("//")) return "https:" + url;
+    if (url.startsWith("/")) return this.baseUrl + url;
+    if (!/^https?:\/\//i.test(url)) return this.baseUrl + "/" + url;
+    
+    return url;
+  }
+
+  getFilterList() { 
+    return []; 
+  }
+
+  getSourcePreferences() { 
+    return []; 
+  }
+}
